@@ -1,277 +1,265 @@
 
 from agents import (
-    build_reader_agent,
     build_search_agent,
+    build_reader_agent,
     writer_chain,
-    critic_chain
+    critic_chain,
 )
 
 
-# --------------------------------------------------
-# 1. HELPER: EXTRACT AGENT RESPONSE
-# --------------------------------------------------
-
-def extract_agent_response(result: dict) -> str:
-    """
-    Extract the final text response from a LangChain agent.
-    Skips intermediate tool-call messages.
-    """
+def extract_agent_response(result):
+    """Extract the final readable response from a LangChain agent."""
 
     messages = result.get("messages", [])
 
     for message in reversed(messages):
+        # Skip messages that only contain tool calls
+        if getattr(message, "tool_calls", None):
+            continue
 
         content = getattr(message, "content", "")
 
-        tool_calls = getattr(message, "tool_calls", [])
-
-        # Skip messages that only request tool execution
-        if tool_calls:
-            continue
-
         if isinstance(content, str) and content.strip():
-            return content.strip()
+            return content
 
-        # Handle structured content blocks
         if isinstance(content, list):
-            text_parts = []
+            parts = []
 
-            for block in content:
-                if isinstance(block, dict) and block.get("type") == "text":
-                    text_parts.append(block.get("text", ""))
+            for item in content:
+                if isinstance(item, dict):
+                    if item.get("type") == "text":
+                        parts.append(item.get("text", ""))
 
-            combined = "\n".join(text_parts).strip()
+                elif isinstance(item, str):
+                    parts.append(item)
 
-            if combined:
-                return combined
+            response = "\n".join(parts).strip()
 
-    raise ValueError(
-        "Agent completed without producing a text response."
-    )
+            if response:
+                return response
+
+    raise ValueError("Agent returned an empty response.")
 
 
-# --------------------------------------------------
-# 2. RESEARCH PIPELINE
-# --------------------------------------------------
-
-def run_research_pipeline(topic: str) -> dict:
+def run_research_pipeline(topic: str, on_stage_update=None) -> dict:
     """
-    Execute the complete four-stage research workflow.
+    Execute the complete ResearchMind pipeline.
 
-    Stages:
-        1. Search Agent
-        2. Reader Agent
-        3. Writer Chain
-        4. Critic Chain
+    Four stages:
+    1. Search Agent
+    2. Reader Agent
+    3. Writer Chain
+    4. Critic Chain
 
-    Returns:
-        Dictionary containing search results,
-        scraped content, report and critic feedback.
+    on_stage_update(stage, status, result)
+    Status values: running, done, failed
     """
 
     if not isinstance(topic, str) or not topic.strip():
-        raise ValueError("Research topic cannot be empty.")
+        raise ValueError("Please provide a valid research topic.")
 
     topic = topic.strip()
 
-    state = {
+    results = {
         "topic": topic,
-        "search_results": "",
-        "scraped_content": "",
-        "report": "",
-        "feedback": ""
+        "search": "",
+        "reader": "",
+        "writer": "",
+        "critic": "",
     }
 
-    # --------------------------------------------------
-    # STEP 1: SEARCH AGENT
-    # --------------------------------------------------
+    def update(stage, status, result=None):
+        """Send progress updates to the Streamlit interface."""
 
-    print("\n" + "=" * 60)
-    print("STEP 1 - SEARCH AGENT")
-    print("=" * 60)
+        if on_stage_update is not None:
+            on_stage_update(stage, status, result)
+
+    # =========================================================
+    # STAGE 1: SEARCH AGENT
+    # =========================================================
+
+    update("search", "running")
 
     try:
+        print("\n" + "=" * 55)
+        print("STAGE 1: SEARCH AGENT")
+        print("=" * 55)
 
         search_agent = build_search_agent()
 
-        search_result = search_agent.invoke({
+        search_response = search_agent.invoke({
             "messages": [
-                (
-                    "user",
-                    (
+                {
+                    "role": "user",
+                    "content": (
                         f"Research the following topic: {topic}\n\n"
-                        "Find recent, reliable and detailed information. "
-                        "Use the web search tool to gather relevant sources. "
-                        "Include source titles, URLs and useful findings. "
-                        "Do not invent sources."
-                    )
-                )
+                        "Find recent and reliable information. "
+                        "Prefer trustworthy sources. "
+                        "Include relevant source URLs and key findings."
+                    ),
+                }
             ]
         })
 
-        state["search_results"] = extract_agent_response(
-            search_result
-        )
+        results["search"] = extract_agent_response(search_response)
 
-        if not state["search_results"]:
-            raise ValueError("Search agent returned empty results.")
+        if not results["search"].strip():
+            raise ValueError("Search Agent returned no results.")
 
-        print("\nSEARCH RESULTS:")
-        print(state["search_results"])
+        update("search", "done", results["search"])
 
-    except Exception as e:
+        print("Search Agent completed successfully.")
 
+    except Exception as exc:
+        update("search", "failed", str(exc))
         raise RuntimeError(
-            f"Search Agent failed: {str(e)}"
-        ) from e
+            f"Search Agent failed: {exc}"
+        ) from exc
 
-    # --------------------------------------------------
-    # STEP 2: READER AGENT
-    # --------------------------------------------------
+    # =========================================================
+    # STAGE 2: READER AGENT
+    # =========================================================
 
-    print("\n" + "=" * 60)
-    print("STEP 2 - READER AGENT")
-    print("=" * 60)
+    update("reader", "running")
 
     try:
+        print("\n" + "=" * 55)
+        print("STAGE 2: READER AGENT")
+        print("=" * 55)
 
         reader_agent = build_reader_agent()
 
-        reader_result = reader_agent.invoke({
+        reader_response = reader_agent.invoke({
             "messages": [
-                (
-                    "user",
-                    (
-                        f"Read and analyze the research sources "
-                        f"about: {topic}\n\n"
-                        "Below are the search results:\n\n"
-                        f"{state['search_results'][:6000]}\n\n"
-                        "Instructions:\n"
-                        "1. Identify the most relevant URLs.\n"
-                        "2. Use the scraping tool to retrieve webpage content.\n"
-                        "3. Extract important facts, technical details "
-                        "and evidence.\n"
-                        "4. Summarize the retrieved information.\n"
-                        "5. Clearly identify sources that could not be accessed.\n"
-                        "Do not invent scraped content."
-                    )
-                )
+                {
+                    "role": "user",
+                    "content": (
+                        f"Research topic: {topic}\n\n"
+                        "Read the following search results. "
+                        "Identify the most relevant URLs and use "
+                        "the scraping tool to retrieve detailed content. "
+                        "Summarize the retrieved information accurately. "
+                        "Do not invent scraped content.\n\n"
+                        f"Search results:\n{results['search'][:8000]}"
+                    ),
+                }
             ]
         })
 
-        state["scraped_content"] = extract_agent_response(
-            reader_result
-        )
+        results["reader"] = extract_agent_response(reader_response)
 
-        if not state["scraped_content"]:
-            raise ValueError("Reader agent returned empty content.")
+        if not results["reader"].strip():
+            raise ValueError("Reader Agent returned no content.")
 
-        print("\nSCRAPED CONTENT:")
-        print(state["scraped_content"])
+        update("reader", "done", results["reader"])
 
-    except Exception as e:
+        print("Reader Agent completed successfully.")
 
+    except Exception as exc:
+        update("reader", "failed", str(exc))
         raise RuntimeError(
-            f"Reader Agent failed: {str(e)}"
-        ) from e
+            f"Reader Agent failed: {exc}"
+        ) from exc
 
-    # --------------------------------------------------
-    # STEP 3: WRITER CHAIN
-    # --------------------------------------------------
+    # =========================================================
+    # STAGE 3: WRITER CHAIN
+    # =========================================================
 
-    print("\n" + "=" * 60)
-    print("STEP 3 - WRITER CHAIN")
-    print("=" * 60)
+    update("writer", "running")
 
     try:
+        print("\n" + "=" * 55)
+        print("STAGE 3: WRITER CHAIN")
+        print("=" * 55)
 
-        research_combined = (
-            "SEARCH RESULTS:\n\n"
-            f"{state['search_results']}\n\n"
-            "DETAILED SCRAPED CONTENT:\n\n"
-            f"{state['scraped_content']}"
+        research = (
+            "SEARCH RESULTS:\n"
+            + results["search"]
+            + "\n\nRETRIEVED RESEARCH CONTENT:\n"
+            + results["reader"]
         )
 
         report = writer_chain.invoke({
             "topic": topic,
-            "research": research_combined
+            "research": research,
         })
 
         if not isinstance(report, str) or not report.strip():
-            raise ValueError("Writer returned an empty report.")
+            raise ValueError("Writer Chain returned an empty report.")
 
-        state["report"] = report.strip()
+        results["writer"] = report
 
-        print("\nFINAL RESEARCH REPORT:")
-        print(state["report"])
+        update("writer", "done", results["writer"])
 
-    except Exception as e:
+        print("Writer Chain completed successfully.")
 
+    except Exception as exc:
+        update("writer", "failed", str(exc))
         raise RuntimeError(
-            f"Writer Chain failed: {str(e)}"
-        ) from e
+            f"Writer Chain failed: {exc}"
+        ) from exc
 
-    # --------------------------------------------------
-    # STEP 4: CRITIC CHAIN
-    # --------------------------------------------------
+    # =========================================================
+    # STAGE 4: CRITIC CHAIN
+    # =========================================================
 
-    print("\n" + "=" * 60)
-    print("STEP 4 - CRITIC CHAIN")
-    print("=" * 60)
+    update("critic", "running")
 
     try:
+        print("\n" + "=" * 55)
+        print("STAGE 4: CRITIC CHAIN")
+        print("=" * 55)
 
         feedback = critic_chain.invoke({
-            "report": state["report"]
+            "report": results["writer"],
         })
 
         if not isinstance(feedback, str) or not feedback.strip():
-            raise ValueError("Critic returned empty feedback.")
+            raise ValueError("Critic Chain returned empty feedback.")
 
-        state["feedback"] = feedback.strip()
+        results["critic"] = feedback
 
-        print("\nCRITIC EVALUATION:")
-        print(state["feedback"])
+        update("critic", "done", results["critic"])
 
-    except Exception as e:
+        print("Critic Chain completed successfully.")
 
+    except Exception as exc:
+        update("critic", "failed", str(exc))
         raise RuntimeError(
-            f"Critic Chain failed: {str(e)}"
-        ) from e
+            f"Critic Chain failed: {exc}"
+        ) from exc
 
-    # --------------------------------------------------
+    # =========================================================
     # PIPELINE COMPLETED
-    # --------------------------------------------------
+    # =========================================================
 
-    print("\n" + "=" * 60)
-    print("RESEARCH PIPELINE COMPLETED SUCCESSFULLY")
-    print("=" * 60)
+    print("\n" + "=" * 55)
+    print("RESEARCHMIND PIPELINE COMPLETED SUCCESSFULLY")
+    print("=" * 55)
 
-    return state
+    return results
 
 
-# --------------------------------------------------
-# 3. LOCAL EXECUTION
-# --------------------------------------------------
+# =============================================================
+# LOCAL EXECUTION
+# =============================================================
 
 if __name__ == "__main__":
 
-    topic = input(
-        "\nEnter a research topic: "
+    research_topic = input(
+        "\nEnter your research topic: "
     ).strip()
 
     try:
+        final_results = run_research_pipeline(research_topic)
 
-        result = run_research_pipeline(topic)
+        print("\n\nFINAL RESEARCH REPORT")
+        print("=" * 55)
+        print(final_results["writer"])
 
-        print("\nRESEARCH COMPLETED")
-        print("\nFinal Report:")
-        print(result["report"])
-
-        print("\nCritic Feedback:")
-        print(result["feedback"])
+        print("\n\nCRITIC FEEDBACK")
+        print("=" * 55)
+        print(final_results["critic"])
 
     except Exception as error:
-
-        print("\nPIPELINE ERROR:")
-        print(str(error))
+        print(f"\nPipeline Error: {error}")
